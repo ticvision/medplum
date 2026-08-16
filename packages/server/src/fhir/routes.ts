@@ -38,7 +38,10 @@ import { codeSystemValidateCodeHandler } from './operations/codesystemvalidateco
 import { conceptMapImportHandler } from './operations/conceptmapimport';
 import { conceptMapTranslateHandler } from './operations/conceptmaptranslate';
 import { appointmentConfirmHandler } from './operations/confirm';
-import { coralStageExchangeClientHandler } from './operations/coralexchangeclient';
+import {
+  coralStageExchangeClientHandler,
+  coralTransitionExchangeClientHandler,
+} from './operations/coralexchangeclient';
 import {
   coverageEligibilitySubmitPostByIdHandler,
   coverageEligibilitySubmitPostHandler,
@@ -240,6 +243,7 @@ function initInternalFhirRouter(): FhirRouter {
 
   // Coral confidential external-auth client stage
   router.add('POST', '/$coral-stage-exchange-client', coralStageExchangeClientHandler);
+  router.add('POST', '/$coral-transition-exchange-client', coralTransitionExchangeClientHandler);
 
   // Project $export
   router.add('GET', '/$export', bulkExportHandler);

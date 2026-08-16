@@ -35,6 +35,7 @@ import { getUserConfiguration } from '../auth/me';
 import { getProjectIdByClientId } from '../auth/utils';
 import { getConfig } from '../config/loader';
 import { getAccessPolicyForLogin } from '../fhir/accesspolicy';
+import { isSafeConfidentialExchangeAuthority } from '../fhir/coralexchangeauthority';
 import { getGlobalSystemRepo } from '../fhir/repo';
 import { getTopicForUser } from '../fhircast/utils';
 import { safeFetch } from '../util/url';
@@ -56,7 +57,6 @@ import {
 
 type ClientIdAndSecret = { error?: string; clientId?: string; clientSecret?: string };
 type FhircastProps = { 'hub.topic': string; 'hub.url': string };
-const CORAL_TOKEN_EXCHANGE_POLICY_NAME = 'Coral confidential token exchange deny all';
 
 /**
  * Handles the OAuth/OpenID Token Endpoint.
@@ -580,29 +580,14 @@ async function validateServerTokenExchangeClientAuthority(
     const membership = memberships[0];
     const projectId = resolveId(membership.project);
     const accessPolicyId = resolveId(membership.accessPolicy);
-    if (
-      client.status !== 'active' ||
-      membership.active !== true ||
-      membership.admin !== false ||
-      membership.access !== undefined ||
-      membership.user?.reference !== clientReference ||
-      membership.profile?.reference !== clientReference ||
-      !projectId ||
-      client.meta?.project !== projectId ||
-      !accessPolicyId
-    ) {
+    if (!projectId || !accessPolicyId) {
       throw new Error('invalid membership authority');
     }
     const [project, accessPolicy] = await Promise.all([
       systemRepo.readResource<Project>('Project', projectId),
       systemRepo.readResource<AccessPolicy>('AccessPolicy', accessPolicyId),
     ]);
-    if (
-      project.superAdmin === true ||
-      accessPolicy.meta?.project !== projectId ||
-      accessPolicy.name !== CORAL_TOKEN_EXCHANGE_POLICY_NAME ||
-      (accessPolicy.resource?.length ?? 0) !== 0
-    ) {
+    if (!isSafeConfidentialExchangeAuthority(project, accessPolicy, client, membership, 'active', true)) {
       throw new Error('invalid access policy authority');
     }
     return true;

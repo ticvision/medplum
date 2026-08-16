@@ -2204,6 +2204,43 @@ describe('OAuth2 Token', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  test('Token exchange rejects a server provider client with browser authority drift', async () => {
+    config.externalAuthProviders = [
+      {
+        issuer: externalAuthIssuer,
+        clientId: serverExternalAuthClient.id,
+        identityProvider: externalIdentityProvider,
+      },
+    ];
+    fetchMock.mockImplementation(() => mockFetchJson({ email }));
+    const originalClient = serverExternalAuthClient;
+    serverExternalAuthClient = await systemRepo.updateResource<ClientApplication>({
+      ...serverExternalAuthClient,
+      allowedOrigin: ['https://unexpected.example.com'],
+    });
+
+    let res: request.Response;
+    try {
+      res = await request(app).post('/oauth2/token').type('form').send({
+        grant_type: OAuthGrantType.TokenExchange,
+        subject_token_type: OAuthTokenType.AccessToken,
+        client_id: serverExternalAuthClient.id,
+        client_secret: serverExternalAuthClient.secret,
+        subject_token: 'opaque-token',
+      });
+    } finally {
+      serverExternalAuthClient = await systemRepo.updateResource<ClientApplication>({
+        ...serverExternalAuthClient,
+        allowedOrigin: originalClient.allowedOrigin,
+      });
+    }
+
+    expect(res).toHaveStatus(400);
+    expect(res.body.error).toBe('invalid_request');
+    expect(res.body.error_description).toBe('Invalid client authority');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   test('Token exchange defaults server external auth selector to identity provider client ID', async () => {
     config.externalAuthProviders = [
       {
@@ -2372,13 +2409,20 @@ describe('OAuth2 Token', () => {
       { issuer: externalAuthIssuer, clientId: serverExternalAuthClient.id, identityProvider: externalIdentityProvider },
     ];
     const membershipId = randomUUID();
-    const readResourceSpy = vi
-      .spyOn(Repository.prototype, 'readResource')
-      .mockResolvedValueOnce(serverExternalAuthClient)
-      .mockResolvedValueOnce({
-        resourceType: 'ProjectMembership',
-        id: membershipId,
-      } as WithId<ProjectMembership>);
+    const originalReadResource = Repository.prototype.readResource;
+    const readResourceSpy = vi.spyOn(Repository.prototype, 'readResource').mockImplementation(function (
+      this: Repository,
+      resourceType,
+      id,
+      options
+    ) {
+      if (resourceType === 'ProjectMembership' && id === membershipId) {
+        return Promise.resolve({ resourceType: 'ProjectMembership', id: membershipId }) as ReturnType<
+          Repository['readResource']
+        >;
+      }
+      return originalReadResource.call(this, resourceType, id, options);
+    });
 
     let res: request.Response;
     try {
