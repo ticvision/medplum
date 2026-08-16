@@ -18,9 +18,11 @@ import {
   resolveId,
 } from '@medplum/core';
 import type {
+  AccessPolicy,
   ClientApplication,
   IdentityProvider,
   Login,
+  Project,
   ProjectMembership,
   Reference,
   User,
@@ -54,6 +56,7 @@ import {
 
 type ClientIdAndSecret = { error?: string; clientId?: string; clientSecret?: string };
 type FhircastProps = { 'hub.topic': string; 'hub.url': string };
+const CORAL_TOKEN_EXCHANGE_POLICY_NAME = 'Coral confidential token exchange deny all';
 
 /**
  * Handles the OAuth/OpenID Token Endpoint.
@@ -476,6 +479,10 @@ export async function exchangeExternalAuthToken(
     return;
   }
 
+  if (useServerExternalAuth && !(await validateServerTokenExchangeClientAuthority(res, systemRepo, client))) {
+    return;
+  }
+
   let projectId: string | undefined;
   if (useServerExternalAuth) {
     if (membershipId) {
@@ -547,11 +554,61 @@ function validateExternalAuthTokenExchangeRequest(
 async function tryReadTokenExchangeClient(
   systemRepo: ReturnType<typeof getGlobalSystemRepo>,
   clientId: string
-): Promise<ClientApplication | undefined> {
+): Promise<WithId<ClientApplication> | undefined> {
   try {
     return await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
   } catch {
     return undefined;
+  }
+}
+
+async function validateServerTokenExchangeClientAuthority(
+  res: Response,
+  systemRepo: ReturnType<typeof getGlobalSystemRepo>,
+  client: WithId<ClientApplication>
+): Promise<boolean> {
+  try {
+    const clientReference = `ClientApplication/${client.id}`;
+    const memberships = await systemRepo.searchResources<ProjectMembership>({
+      resourceType: 'ProjectMembership',
+      count: 2,
+      filters: [{ code: 'user', operator: Operator.EQUALS, value: clientReference }],
+    });
+    if (memberships.length !== 1) {
+      throw new Error('invalid membership count');
+    }
+    const membership = memberships[0];
+    const projectId = resolveId(membership.project);
+    const accessPolicyId = resolveId(membership.accessPolicy);
+    if (
+      client.status !== 'active' ||
+      membership.active !== true ||
+      membership.admin !== false ||
+      membership.access !== undefined ||
+      membership.user?.reference !== clientReference ||
+      membership.profile?.reference !== clientReference ||
+      !projectId ||
+      client.meta?.project !== projectId ||
+      !accessPolicyId
+    ) {
+      throw new Error('invalid membership authority');
+    }
+    const [project, accessPolicy] = await Promise.all([
+      systemRepo.readResource<Project>('Project', projectId),
+      systemRepo.readResource<AccessPolicy>('AccessPolicy', accessPolicyId),
+    ]);
+    if (
+      project.superAdmin === true ||
+      accessPolicy.meta?.project !== projectId ||
+      accessPolicy.name !== CORAL_TOKEN_EXCHANGE_POLICY_NAME ||
+      (accessPolicy.resource?.length ?? 0) !== 0
+    ) {
+      throw new Error('invalid access policy authority');
+    }
+    return true;
+  } catch {
+    sendTokenError(res, 'invalid_request', 'Invalid client authority');
+    return false;
   }
 }
 

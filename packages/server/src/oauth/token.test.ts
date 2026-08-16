@@ -124,6 +124,7 @@ describe('OAuth2 Token', () => {
   let externalAuthClient: ClientApplication;
   let serverExternalAuthClient: WithId<ClientApplication>;
   let defaultServerExternalAuthClient: WithId<ClientApplication>;
+  let serverExternalAuthPolicy: WithId<AccessPolicy>;
   let gcipAuthClient: ClientApplication;
   let gcipSubjectAuthClient: ClientApplication;
   let gcipMissingKeyClient: ClientApplication;
@@ -198,12 +199,40 @@ describe('OAuth2 Token', () => {
       resourceType: 'ClientApplication',
       status: 'active',
       secret: generateSecret(32),
+      meta: { project: project.id },
     });
     defaultServerExternalAuthClient = await systemRepo.createResource<ClientApplication>({
       resourceType: 'ClientApplication',
       status: 'active',
       secret: generateSecret(32),
+      meta: { project: project.id },
     });
+    serverExternalAuthPolicy = await systemRepo.createResource<AccessPolicy>({
+      resourceType: 'AccessPolicy',
+      meta: { project: project.id },
+      name: 'Coral confidential token exchange deny all',
+      resource: [],
+    });
+    for (const exchangeClient of [serverExternalAuthClient, defaultServerExternalAuthClient]) {
+      const exchangeMembership = await systemRepo.createResource<ProjectMembership>({
+        resourceType: 'ProjectMembership',
+        user: createReference(exchangeClient),
+        profile: createReference(exchangeClient),
+        project: createReference(project),
+        accessPolicy: createReference(serverExternalAuthPolicy),
+        active: true,
+        admin: false,
+      });
+      expect(exchangeMembership).toMatchObject({
+        active: true,
+        admin: false,
+        user: { reference: `ClientApplication/${exchangeClient.id}` },
+        profile: { reference: `ClientApplication/${exchangeClient.id}` },
+        project: { reference: `Project/${project.id}` },
+        accessPolicy: { reference: `AccessPolicy/${serverExternalAuthPolicy.id}` },
+      });
+      expect(exchangeClient.meta?.project).toBe(project.id);
+    }
 
     gcipAuthClient = await createClient(systemRepo, {
       project,
@@ -2143,6 +2172,35 @@ describe('OAuth2 Token', () => {
     expect(res).toHaveStatus(400);
     expect(res.body.error).toBe('invalid_request');
     expect(res.body.error_description).toBe('Missing client_secret');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('Token exchange rejects a server provider client without explicit deny-all authority', async () => {
+    const unboundClient = await systemRepo.createResource<ClientApplication>({
+      resourceType: 'ClientApplication',
+      status: 'active',
+      secret: generateSecret(32),
+      meta: { project: project.id },
+    });
+    config.externalAuthProviders = [
+      {
+        issuer: externalAuthIssuer,
+        clientId: unboundClient.id,
+        identityProvider: externalIdentityProvider,
+      },
+    ];
+    fetchMock.mockImplementation(() => mockFetchJson({ email }));
+
+    const res = await request(app).post('/oauth2/token').type('form').send({
+      grant_type: OAuthGrantType.TokenExchange,
+      subject_token_type: OAuthTokenType.AccessToken,
+      client_id: unboundClient.id,
+      client_secret: unboundClient.secret,
+      subject_token: 'opaque-token',
+    });
+    expect(res).toHaveStatus(400);
+    expect(res.body.error).toBe('invalid_request');
+    expect(res.body.error_description).toBe('Invalid client authority');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
