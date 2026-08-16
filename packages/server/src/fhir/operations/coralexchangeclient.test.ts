@@ -408,4 +408,37 @@ describe('stageCoralExchangeClientResources', () => {
       expect(JSON.stringify(response.body)).not.toContain(version);
     }
   });
+
+  test('reads a sanitized staged authority snapshot without exposing the secret or resource IDs', async () => {
+    await withTestContext(async () => {
+      await stageCoralExchangeClientResources(getGlobalSystemRepo(), SECRET);
+    });
+    const accessToken = await initTestAuth({ superAdmin: true });
+
+    const response = await request(app)
+      .post('/fhir/R4/$coral-exchange-client-state')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .set('Content-Type', ContentType.FHIR_JSON)
+      .send({ resourceType: 'Parameters' });
+
+    expect(response).toHaveStatus(200);
+    expect(response.body.resourceType).toBe('Parameters');
+    expect(response.body.parameter).toEqual([
+      { name: 'status', valueCode: 'staged' },
+      { name: 'projectVersionId', valueString: expect.any(String) },
+      { name: 'policyVersionId', valueString: expect.any(String) },
+      { name: 'clientVersionId', valueString: expect.any(String) },
+      { name: 'membershipVersionId', valueString: expect.any(String) },
+    ]);
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(SECRET);
+    for (const id of [
+      CORAL_EXCHANGE_PROJECT_ID,
+      CORAL_EXCHANGE_POLICY_ID,
+      CORAL_EXCHANGE_CLIENT_ID,
+      CORAL_EXCHANGE_MEMBERSHIP_ID,
+    ]) {
+      expect(body).not.toContain(id);
+    }
+  });
 });

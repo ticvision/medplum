@@ -59,6 +59,20 @@ const transitionOperation = makeOperationDefinition(
     ],
   }
 );
+const stateOperation = makeOperationDefinition(
+  { scope: 'system' },
+  {
+    name: 'CoralExchangeClientState',
+    code: 'coral-exchange-client-state',
+    parameter: [
+      { use: 'out', name: 'status', type: 'code', min: 1, max: '1' },
+      { use: 'out', name: 'projectVersionId', type: 'string', min: 1, max: '1' },
+      { use: 'out', name: 'policyVersionId', type: 'string', min: 1, max: '1' },
+      { use: 'out', name: 'clientVersionId', type: 'string', min: 1, max: '1' },
+      { use: 'out', name: 'membershipVersionId', type: 'string', min: 1, max: '1' },
+    ],
+  }
+);
 
 interface StageExchangeClientParameters {
   clientSecret: string;
@@ -71,6 +85,14 @@ export interface TransitionExchangeClientParameters {
   clientVersionId: string;
   membershipVersionId: string;
   clientSecret: string;
+}
+
+interface ExchangeClientState {
+  status: 'active' | 'staged';
+  projectVersionId: string;
+  policyVersionId: string;
+  clientVersionId: string;
+  membershipVersionId: string;
 }
 
 function secretsEqual(actual: string | undefined, expected: string): boolean {
@@ -105,6 +127,48 @@ function isExactAuthority(
       expectedMembershipActive
     )
   );
+}
+
+/** Returns a secret-free CAS snapshot of the exact fixed authority graph. */
+export async function readCoralExchangeClientState(systemRepo: SystemRepository): Promise<ExchangeClientState> {
+  const [project, policy, client, membership, memberships] = await Promise.all([
+    systemRepo.readResource<Project>('Project', CORAL_EXCHANGE_PROJECT_ID),
+    systemRepo.readResource<AccessPolicy>('AccessPolicy', CORAL_EXCHANGE_POLICY_ID),
+    systemRepo.readResource<ClientApplication>('ClientApplication', CORAL_EXCHANGE_CLIENT_ID),
+    systemRepo.readResource<ProjectMembership>('ProjectMembership', CORAL_EXCHANGE_MEMBERSHIP_ID),
+    systemRepo.searchResources<ProjectMembership>({
+      resourceType: 'ProjectMembership',
+      count: 2,
+      filters: [
+        {
+          code: 'user',
+          operator: Operator.EQUALS,
+          value: `ClientApplication/${CORAL_EXCHANGE_CLIENT_ID}`,
+        },
+      ],
+    }),
+  ]);
+  const status =
+    isExactAuthority(project, policy, client, membership, 'off', false) && CLIENT_SECRET.test(client.secret ?? '')
+      ? ('staged' as const)
+      : isExactAuthority(project, policy, client, membership, 'active', true) && CLIENT_SECRET.test(client.secret ?? '')
+        ? ('active' as const)
+        : undefined;
+  const versions = {
+    projectVersionId: project.meta?.versionId,
+    policyVersionId: policy.meta?.versionId,
+    clientVersionId: client.meta?.versionId,
+    membershipVersionId: membership.meta?.versionId,
+  };
+  if (
+    !status ||
+    memberships.length !== 1 ||
+    memberships[0].id !== CORAL_EXCHANGE_MEMBERSHIP_ID ||
+    Object.values(versions).some((version) => typeof version !== 'string' || !UUID.test(version))
+  ) {
+    throw new OperationOutcomeError(badRequest('Invalid Coral exchange authority state'));
+  }
+  return { status, ...(versions as Omit<ExchangeClientState, 'status'>) };
 }
 
 async function requireCreateOnlyId(repo: SystemRepository, resourceType: ResourceType, id: string): Promise<void> {
@@ -324,4 +388,14 @@ export async function coralTransitionExchangeClientHandler(req: FhirRequest): Pr
       status: input.action === 'activate' ? 'activated' : 'restaged',
     }),
   ];
+}
+
+/** Returns the exact authority state and versions without exposing its credential. */
+export async function coralExchangeClientStateHandler(_req: FhirRequest): Promise<FhirResponse> {
+  const { project } = getAuthenticatedContext();
+  if (project.superAdmin !== true) {
+    return [forbidden];
+  }
+  const state = await readCoralExchangeClientState(getGlobalSystemRepo());
+  return [allOk, buildOutputParameters(stateOperation, state)];
 }
