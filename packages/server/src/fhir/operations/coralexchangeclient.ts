@@ -79,7 +79,7 @@ interface StageExchangeClientParameters {
 }
 
 export interface TransitionExchangeClientParameters {
-  action: 'activate' | 'restage';
+  action: 'activate' | 'restage' | 'verify';
   projectVersionId: string;
   policyVersionId: string;
   clientVersionId: string;
@@ -274,7 +274,7 @@ export async function transitionCoralExchangeClientResources(
     !UUID.test(input.clientVersionId) ||
     !UUID.test(input.membershipVersionId) ||
     !CLIENT_SECRET.test(input.clientSecret) ||
-    !['activate', 'restage'].includes(input.action)
+    !['activate', 'restage', 'verify'].includes(input.action)
   ) {
     throw new OperationOutcomeError(badRequest('Invalid Coral exchange authority transition'));
   }
@@ -321,7 +321,14 @@ export async function transitionCoralExchangeClientResources(
                 nextClientStatus: 'off' as const,
                 nextActive: false,
               }
-            : undefined;
+            : input.action === 'verify'
+              ? {
+                  clientStatus: 'active' as const,
+                  membershipActive: true,
+                  nextClientStatus: undefined,
+                  nextActive: undefined,
+                }
+              : undefined;
       if (
         !expectedState ||
         memberships.length !== 1 ||
@@ -338,14 +345,16 @@ export async function transitionCoralExchangeClientResources(
       ) {
         throw new OperationOutcomeError(badRequest('Invalid Coral exchange authority transition'));
       }
-      await txRepo.updateResource<ClientApplication>(
-        { ...client, status: expectedState.nextClientStatus },
-        { ifMatch: input.clientVersionId }
-      );
-      await txRepo.updateResource<ProjectMembership>(
-        { ...membership, active: expectedState.nextActive },
-        { ifMatch: input.membershipVersionId }
-      );
+      if (input.action !== 'verify') {
+        await txRepo.updateResource<ClientApplication>(
+          { ...client, status: expectedState.nextClientStatus },
+          { ifMatch: input.clientVersionId }
+        );
+        await txRepo.updateResource<ProjectMembership>(
+          { ...membership, active: expectedState.nextActive },
+          { ifMatch: input.membershipVersionId }
+        );
+      }
     },
     {
       serializable: true,
@@ -385,7 +394,7 @@ export async function coralTransitionExchangeClientHandler(req: FhirRequest): Pr
   return [
     allOk,
     buildOutputParameters(transitionOperation, {
-      status: input.action === 'activate' ? 'activated' : 'restaged',
+      status: input.action === 'activate' ? 'activated' : input.action === 'restage' ? 'restaged' : 'verified',
     }),
   ];
 }

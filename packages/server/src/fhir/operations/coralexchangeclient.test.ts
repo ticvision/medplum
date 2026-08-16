@@ -14,6 +14,7 @@ import {
   CORAL_EXCHANGE_MEMBERSHIP_ID,
   CORAL_EXCHANGE_POLICY_ID,
   CORAL_EXCHANGE_PROJECT_ID,
+  readCoralExchangeClientState,
   stageCoralExchangeClientResources,
   transitionCoralExchangeClientResources,
 } from './coralexchangeclient';
@@ -303,6 +304,61 @@ describe('stageCoralExchangeClientResources', () => {
         await systemRepo.readResource<ProjectMembership>('ProjectMembership', CORAL_EXCHANGE_MEMBERSHIP_ID)
       ).toMatchObject({ active: false, admin: false });
     }));
+
+  test('verifies the exact active authority without changing any resource version', async () => {
+    let versions: Record<string, string> = {};
+    await withTestContext(async () => {
+      const systemRepo = getGlobalSystemRepo();
+      await stageCoralExchangeClientResources(systemRepo, SECRET);
+      const project = await systemRepo.readResource<Project>('Project', CORAL_EXCHANGE_PROJECT_ID);
+      const policy = await systemRepo.readResource<AccessPolicy>('AccessPolicy', CORAL_EXCHANGE_POLICY_ID);
+      let client = await systemRepo.readResource<ClientApplication>('ClientApplication', CORAL_EXCHANGE_CLIENT_ID);
+      let membership = await systemRepo.readResource<ProjectMembership>(
+        'ProjectMembership',
+        CORAL_EXCHANGE_MEMBERSHIP_ID
+      );
+      await transitionCoralExchangeClientResources(systemRepo, {
+        action: 'activate',
+        projectVersionId: project.meta?.versionId as string,
+        policyVersionId: policy.meta?.versionId as string,
+        clientVersionId: client.meta?.versionId as string,
+        membershipVersionId: membership.meta?.versionId as string,
+        clientSecret: SECRET,
+      });
+      client = await systemRepo.readResource<ClientApplication>('ClientApplication', CORAL_EXCHANGE_CLIENT_ID);
+      membership = await systemRepo.readResource<ProjectMembership>('ProjectMembership', CORAL_EXCHANGE_MEMBERSHIP_ID);
+      versions = {
+        projectVersionId: project.meta?.versionId as string,
+        policyVersionId: policy.meta?.versionId as string,
+        clientVersionId: client.meta?.versionId as string,
+        membershipVersionId: membership.meta?.versionId as string,
+      };
+    });
+    const accessToken = await initTestAuth({ superAdmin: true });
+
+    const response = await request(app)
+      .post('/fhir/R4/$coral-transition-exchange-client')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .set('Content-Type', ContentType.FHIR_JSON)
+      .send({
+        resourceType: 'Parameters',
+        parameter: [
+          { name: 'action', valueCode: 'verify' },
+          ...Object.entries(versions).map(([name, valueString]) => ({ name, valueString })),
+          { name: 'clientSecret', valueString: SECRET },
+        ],
+      });
+
+    expect(response).toHaveStatus(200);
+    expect(response.body).toEqual({
+      resourceType: 'Parameters',
+      parameter: [{ name: 'status', valueCode: 'verified' }],
+    });
+    await withTestContext(async () => {
+      const state = await readCoralExchangeClientState(getGlobalSystemRepo());
+      expect(state).toEqual({ status: 'active', ...versions });
+    });
+  });
 
   test('rolls back the policy when a concurrent fixed client already exists', () =>
     withTestContext(async () => {
