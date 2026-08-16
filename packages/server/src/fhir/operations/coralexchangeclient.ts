@@ -11,14 +11,7 @@ import {
   normalizeOperationOutcome,
 } from '@medplum/core';
 import type { FhirRequest, FhirResponse } from '@medplum/fhir-router';
-import type {
-  AccessPolicy,
-  ClientApplication,
-  Project,
-  ProjectMembership,
-  Reference,
-  ResourceType,
-} from '@medplum/fhirtypes';
+import type { AccessPolicy, ClientApplication, Project, ProjectMembership, ResourceType } from '@medplum/fhirtypes';
 import { getAuthenticatedContext } from '../../context';
 import type { SystemRepository } from '../repo';
 import { getGlobalSystemRepo } from '../repo';
@@ -26,6 +19,7 @@ import { makeOperationDefinition } from './definitions';
 import { buildOutputParameters, parseInputParameters } from './utils/parameters';
 
 export const CORAL_EXCHANGE_CLIENT_ID = '9c2f4b6a-7d31-4e58-9a06-8b5f0e2c41d7';
+export const CORAL_EXCHANGE_PROJECT_ID = '5e83f5c7-f0b3-4dc8-a6af-8f0d9b0b0b19';
 export const CORAL_EXCHANGE_POLICY_ID = '77d9769f-59d2-46de-a5b4-f4ed33b32780';
 export const CORAL_EXCHANGE_MEMBERSHIP_ID = '25154d7a-d0b1-4e23-9038-698dd184423d';
 export const CORAL_EXCHANGE_POLICY_NAME = 'Coral confidential token exchange deny all';
@@ -38,7 +32,6 @@ const operation = makeOperationDefinition(
     name: 'CoralStageExchangeClient',
     code: 'coral-stage-exchange-client',
     parameter: [
-      { use: 'in', name: 'project', type: 'Reference', min: 1, max: '1' },
       { use: 'in', name: 'clientSecret', type: 'string', min: 1, max: '1' },
       { use: 'out', name: 'status', type: 'code', min: 1, max: '1' },
     ],
@@ -46,7 +39,6 @@ const operation = makeOperationDefinition(
 );
 
 interface StageExchangeClientParameters {
-  project: Reference;
   clientSecret: string;
 }
 
@@ -66,30 +58,35 @@ async function requireCreateOnlyId(repo: SystemRepository, resourceType: Resourc
 /**
  * Atomically stage the fixed Coral exchange authority in an unusable state.
  *
- * All three creates share one serializable database transaction. A conflicting
+ * All four creates share one serializable database transaction. A conflicting
  * fixed ID therefore rolls the entire stage back instead of turning a stale
  * GET-404 observation into an overwrite. Activation is deliberately separate.
  * @param systemRepo - Super-admin system repository.
- * @param projectId - Dedicated non-superadmin control Project UUID.
  * @param clientSecret - Exact in-memory AWSCURRENT credential.
  */
 export async function stageCoralExchangeClientResources(
   systemRepo: SystemRepository,
-  projectId: string,
   clientSecret: string
 ): Promise<void> {
-  if (!UUID.test(projectId) || !CLIENT_SECRET.test(clientSecret)) {
+  if (!UUID.test(CORAL_EXCHANGE_PROJECT_ID) || !CLIENT_SECRET.test(clientSecret)) {
     throw new OperationOutcomeError(badRequest('Invalid Coral exchange authority input'));
   }
   await systemRepo.withTransaction(
     async (txRepo) => {
-      const project = await txRepo.readResource<Project>('Project', projectId);
-      if (project.superAdmin === true) {
-        throw new OperationOutcomeError(badRequest('Invalid Coral exchange authority project'));
-      }
+      await requireCreateOnlyId(txRepo, 'Project', CORAL_EXCHANGE_PROJECT_ID);
       await requireCreateOnlyId(txRepo, 'AccessPolicy', CORAL_EXCHANGE_POLICY_ID);
       await requireCreateOnlyId(txRepo, 'ClientApplication', CORAL_EXCHANGE_CLIENT_ID);
       await requireCreateOnlyId(txRepo, 'ProjectMembership', CORAL_EXCHANGE_MEMBERSHIP_ID);
+      const project = await txRepo.createResource<Project>(
+        {
+          resourceType: 'Project',
+          id: CORAL_EXCHANGE_PROJECT_ID,
+          name: 'Coral confidential exchange control',
+          strictMode: true,
+          superAdmin: false,
+        },
+        { assignedId: true }
+      );
       const policy = await txRepo.createResource<AccessPolicy>(
         {
           resourceType: 'AccessPolicy',
@@ -135,7 +132,7 @@ export async function stageCoralExchangeClientResources(
 
 /**
  * Handles the super-admin-only atomic Coral exchange authority stage.
- * @param req - FHIR operation request containing the target Project and secret.
+ * @param req - FHIR operation request containing only the staged secret.
  * @returns A sanitized staged receipt.
  */
 export async function coralStageExchangeClientHandler(req: FhirRequest): Promise<FhirResponse> {
@@ -144,10 +141,6 @@ export async function coralStageExchangeClientHandler(req: FhirRequest): Promise
     return [forbidden];
   }
   const input = parseInputParameters<StageExchangeClientParameters>(operation, req);
-  const projectId = input.project.reference?.match(/^Project\/([0-9a-f-]+)$/)?.[1];
-  if (!projectId) {
-    throw new OperationOutcomeError(badRequest('Invalid Coral exchange authority project'));
-  }
-  await stageCoralExchangeClientResources(getGlobalSystemRepo(), projectId, input.clientSecret);
+  await stageCoralExchangeClientResources(getGlobalSystemRepo(), input.clientSecret);
   return [created, buildOutputParameters(operation, { status: 'staged' })];
 }

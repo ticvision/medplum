@@ -13,6 +13,7 @@ import {
   CORAL_EXCHANGE_CLIENT_ID,
   CORAL_EXCHANGE_MEMBERSHIP_ID,
   CORAL_EXCHANGE_POLICY_ID,
+  CORAL_EXCHANGE_PROJECT_ID,
   stageCoralExchangeClientResources,
 } from './coralexchangeclient';
 
@@ -35,6 +36,7 @@ describe('stageCoralExchangeClientResources', () => {
         ['ProjectMembership', CORAL_EXCHANGE_MEMBERSHIP_ID],
         ['ClientApplication', CORAL_EXCHANGE_CLIENT_ID],
         ['AccessPolicy', CORAL_EXCHANGE_POLICY_ID],
+        ['Project', CORAL_EXCHANGE_PROJECT_ID],
       ] as const) {
         await systemRepo.deleteResource(resourceType, id).catch(() => undefined);
       }
@@ -43,17 +45,22 @@ describe('stageCoralExchangeClientResources', () => {
 
   test('atomically stages one fixed off client with an inactive deny-all membership', () =>
     withTestContext(async () => {
-      const { project } = await createTestProject();
       const systemRepo = getGlobalSystemRepo();
 
-      await stageCoralExchangeClientResources(systemRepo, project.id, SECRET);
+      await stageCoralExchangeClientResources(systemRepo, SECRET);
 
+      const project = await systemRepo.readResource('Project', CORAL_EXCHANGE_PROJECT_ID);
       const policy = await systemRepo.readResource<AccessPolicy>('AccessPolicy', CORAL_EXCHANGE_POLICY_ID);
       const client = await systemRepo.readResource<ClientApplication>('ClientApplication', CORAL_EXCHANGE_CLIENT_ID);
       const membership = await systemRepo.readResource<ProjectMembership>(
         'ProjectMembership',
         CORAL_EXCHANGE_MEMBERSHIP_ID
       );
+      expect(project).toMatchObject({
+        name: 'Coral confidential exchange control',
+        strictMode: true,
+        superAdmin: false,
+      });
       expect(policy).toMatchObject({
         meta: { project: project.id },
         name: 'Coral confidential token exchange deny all',
@@ -91,24 +98,32 @@ describe('stageCoralExchangeClientResources', () => {
         { assignedId: true }
       );
 
-      await expect(stageCoralExchangeClientResources(systemRepo, project.id, SECRET)).rejects.toBeDefined();
+      await expect(stageCoralExchangeClientResources(systemRepo, SECRET)).rejects.toBeDefined();
+      await expect(systemRepo.readResource('Project', CORAL_EXCHANGE_PROJECT_ID)).rejects.toBeDefined();
       await expect(systemRepo.readResource('AccessPolicy', CORAL_EXCHANGE_POLICY_ID)).rejects.toBeDefined();
       await expect(systemRepo.readResource('ProjectMembership', CORAL_EXCHANGE_MEMBERSHIP_ID)).rejects.toBeDefined();
       const winner = await systemRepo.readResource<ClientApplication>('ClientApplication', CORAL_EXCHANGE_CLIENT_ID);
       expect(winner.secret).not.toBe(SECRET);
     }));
 
-  test('rejects a super-admin target before creating any resource', () =>
+  test('rejects a pre-existing fixed control Project before creating authority', () =>
     withTestContext(async () => {
-      const { project } = await createTestProject({ superAdmin: true });
       const systemRepo = getGlobalSystemRepo();
+      await systemRepo.createResource(
+        {
+          resourceType: 'Project',
+          id: CORAL_EXCHANGE_PROJECT_ID,
+          name: 'Foreign winner',
+          superAdmin: false,
+        },
+        { assignedId: true }
+      );
 
-      await expect(stageCoralExchangeClientResources(systemRepo, project.id, SECRET)).rejects.toBeDefined();
+      await expect(stageCoralExchangeClientResources(systemRepo, SECRET)).rejects.toBeDefined();
       await expect(systemRepo.readResource('ClientApplication', CORAL_EXCHANGE_CLIENT_ID)).rejects.toBeDefined();
     }));
 
   test('exposes only a super-admin FHIR operation and never echoes the secret', async () => {
-    const { project } = await createTestProject();
     const accessToken = await initTestAuth({ superAdmin: true });
 
     const response = await request(app)
@@ -117,10 +132,7 @@ describe('stageCoralExchangeClientResources', () => {
       .set('Content-Type', ContentType.FHIR_JSON)
       .send({
         resourceType: 'Parameters',
-        parameter: [
-          { name: 'project', valueReference: createReference(project) },
-          { name: 'clientSecret', valueString: SECRET },
-        ],
+        parameter: [{ name: 'clientSecret', valueString: SECRET }],
       });
 
     expect(response).toHaveStatus(201);
