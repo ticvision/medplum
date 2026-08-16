@@ -74,12 +74,13 @@ export class AuthenticatedRequestContext extends RequestContext {
     let loggerMetadata: Record<string, any> | undefined;
     const projectId = repo.currentProject()?.id;
     if (projectId) {
-      let profile = authState.membership.profile.reference;
+      const profileType = authState.membership.profile.reference?.split('/')[0];
       const asUserProfile = authState.onBehalfOfMembership?.profile.reference;
-      if (asUserProfile && asUserProfile !== profile) {
-        profile += ` (as ${asUserProfile})`;
-      }
-      loggerMetadata = { projectId, profile };
+      loggerMetadata = {
+        projectId,
+        profileType,
+        onBehalfOf: !!asUserProfile && asUserProfile !== authState.membership.profile.reference,
+      };
     }
     super(requestId, traceId, options?.logger, loggerMetadata);
 

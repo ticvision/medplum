@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import { initAppServices, shutdownApp } from '../app';
 import { loadTestConfig } from '../config/loader';
 import type { Repository, SystemRepository } from '../fhir/repo';
+import { globalLogger } from '../logger';
 import { createTestClient, createTestProject, withTestContext } from '../test.setup';
 import { verifyJwt } from './keys';
 import {
@@ -87,6 +88,7 @@ describe('OAuth utils', () => {
   });
 
   test('User not found', async () => {
+    const warn = vi.spyOn(globalLogger, 'warn');
     try {
       await tryLogin({
         clientId: client.id,
@@ -101,6 +103,17 @@ describe('OAuth utils', () => {
       const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.severity).toStrictEqual('error');
       expect(outcome.issue?.[0]?.details?.text).toStrictEqual('User not found');
+      expect(warn).toHaveBeenCalledWith('tryLogin User not found', {
+        authMethod: 'password',
+        hasEmail: true,
+        hasExternalId: false,
+        hasProject: false,
+        hasMembership: false,
+      });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('user-not-found@example.com');
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('medplum_admin');
+    } finally {
+      warn.mockRestore();
     }
   });
 

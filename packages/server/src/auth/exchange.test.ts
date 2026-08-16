@@ -25,7 +25,6 @@ const email = `text@${domain}`;
 const redirectUri = `https://${domain}/auth/callback`;
 const externalId = `google-oauth2|${randomUUID()}`;
 const externalAuthIssuer = 'https://example.com';
-const externalAuthConfigClientId = randomUUID();
 const identityProvider = {
   authorizeUrl: 'https://example.com/oauth2/authorize',
   tokenUrl: 'https://example.com/oauth2/token',
@@ -46,6 +45,7 @@ let externalAuthClient: ClientApplication;
 let subjectAuthClient: ClientApplication;
 let gcipAuthClient: ClientApplication;
 let gcipSubjectAuthClient: ClientApplication;
+let serverExternalAuthClient: ClientApplication;
 
 describe('Token Exchange', () => {
   beforeAll(async () => {
@@ -108,6 +108,11 @@ describe('Token Exchange', () => {
           useSubject: true,
         },
       });
+      serverExternalAuthClient = await systemRepo.createResource<ClientApplication>({
+        resourceType: 'ClientApplication',
+        status: 'active',
+        secret: randomUUID(),
+      });
 
       // Invite user with external ID
       await inviteUser({
@@ -133,6 +138,7 @@ describe('Token Exchange', () => {
     const res = await request(app).post('/auth/exchange').type('json').send({
       externalAccessToken: '',
       clientId: defaultClient.id,
+      clientSecret: defaultClient.secret,
     });
     expect(res).toHaveStatus(400);
     expect(res.body.issue[0].details.text).toBe('Missing externalAccessToken');
@@ -142,15 +148,28 @@ describe('Token Exchange', () => {
     const res = await request(app).post('/auth/exchange').type('json').send({
       externalAccessToken: 'xyz',
       clientId: '',
+      clientSecret: defaultClient.secret,
     });
     expect(res).toHaveStatus(400);
     expect(res.body.issue[0].details.text).toBe('Missing clientId');
+  });
+
+  test('Missing clientSecret', async () => {
+    const res = await request(app).post('/auth/exchange').type('json').send({
+      externalAccessToken: 'xyz',
+      clientId: externalAuthClient.id,
+      clientSecret: '',
+    });
+    expect(res).toHaveStatus(400);
+    expect(res.body.issue[0].details.text).toBe('Missing clientSecret');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test('Missing identity provider', async () => {
     const res = await request(app).post('/auth/exchange').type('json').send({
       externalAccessToken: 'xyz',
       clientId: defaultClient.id,
+      clientSecret: defaultClient.secret,
     });
     expect(res).toHaveStatus(400);
     expect(res.body.error_description).toBe('Invalid client');
@@ -162,6 +181,7 @@ describe('Token Exchange', () => {
     const res = await request(app).post('/auth/exchange').type('json').send({
       externalAccessToken: 'xyz',
       clientId: externalAuthClient.id,
+      clientSecret: externalAuthClient.secret,
     });
     expect(res).toHaveStatus(400);
     expect(res.body.issue[0].details.text).toBe('User not found');
@@ -173,6 +193,7 @@ describe('Token Exchange', () => {
     const res = await request(app).post('/auth/exchange').type('json').send({
       externalAccessToken: 'xyz',
       clientId: externalAuthClient.id,
+      clientSecret: externalAuthClient.secret,
     });
     expect(res).toHaveStatus(200);
     expect(res.body.access_token).toBeTruthy();
@@ -180,14 +201,15 @@ describe('Token Exchange', () => {
 
   test('Server external auth provider success', async () => {
     config.externalAuthProviders = [
-      { issuer: externalAuthIssuer, clientId: externalAuthConfigClientId, identityProvider },
+      { issuer: externalAuthIssuer, clientId: serverExternalAuthClient.id, identityProvider },
     ];
 
     fetchMock.mockImplementation(() => mockFetchJson({ email }));
 
     const res = await request(app).post('/auth/exchange').type('json').send({
       externalAccessToken: 'xyz',
-      clientId: externalAuthConfigClientId,
+      clientId: serverExternalAuthClient.id,
+      clientSecret: serverExternalAuthClient.secret,
     });
     expect(res).toHaveStatus(200);
     expect(res.body.access_token).toBeTruthy();
@@ -199,6 +221,7 @@ describe('Token Exchange', () => {
     const res = await request(app).post('/auth/exchange').type('json').send({
       externalAccessToken: 'firebase-token',
       clientId: gcipAuthClient.id,
+      clientSecret: gcipAuthClient.secret,
     });
     expect(res).toHaveStatus(200);
     expect(res.body.access_token).toBeTruthy();
@@ -225,6 +248,7 @@ describe('Token Exchange', () => {
       externalAccessToken: 'xyz',
       projectId: '',
       clientId: externalAuthClient.id,
+      clientSecret: externalAuthClient.secret,
     });
     expect(res).toHaveStatus(200);
   });
@@ -235,6 +259,7 @@ describe('Token Exchange', () => {
     const res = await request(app).post('/auth/exchange').type('json').send({
       externalAccessToken: 'xyz',
       clientId: externalAuthClient.id,
+      clientSecret: externalAuthClient.secret,
     });
     expect(res).toHaveStatus(400);
     expect(res.body.error).toBe('invalid_request');
@@ -247,6 +272,7 @@ describe('Token Exchange', () => {
     const res = await request(app).post('/auth/exchange').type('json').send({
       externalAccessToken: 'xyz',
       clientId: subjectAuthClient.id,
+      clientSecret: subjectAuthClient.secret,
     });
     expect(res).toHaveStatus(200);
     expect(res.body.access_token).toBeTruthy();
@@ -258,6 +284,7 @@ describe('Token Exchange', () => {
     const res = await request(app).post('/auth/exchange').type('json').send({
       externalAccessToken: 'firebase-token',
       clientId: gcipSubjectAuthClient.id,
+      clientSecret: gcipSubjectAuthClient.secret,
     });
     expect(res).toHaveStatus(200);
     expect(res.body.access_token).toBeTruthy();
@@ -269,6 +296,7 @@ describe('Token Exchange', () => {
     const res = await request(app).post('/auth/exchange').type('json').send({
       externalAccessToken: 'firebase-token',
       clientId: gcipAuthClient.id,
+      clientSecret: gcipAuthClient.secret,
     });
     expect(res).toHaveStatus(400);
     expect(res.body.error_description).toBe('Failed to verify code - missing localId in user info response');

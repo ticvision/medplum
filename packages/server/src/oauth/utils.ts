@@ -172,7 +172,13 @@ export async function tryLogin(request: LoginRequest): Promise<WithId<Login>> {
   }
 
   if (!user) {
-    getLogger().warn('tryLogin User not found', { ...request, password: undefined, codeChallenge: undefined });
+    getLogger().warn('tryLogin User not found', {
+      authMethod: request.authMethod,
+      hasEmail: !!request.email,
+      hasExternalId: !!request.externalId,
+      hasProject: !!request.projectId,
+      hasMembership: !!request.membershipId,
+    });
     throw new OperationOutcomeError(badRequest('User not found'));
   }
 

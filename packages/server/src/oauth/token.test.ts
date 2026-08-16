@@ -102,7 +102,6 @@ describe('OAuth2 Token', () => {
   const redirectUri = `https://${domain}/auth/callback`;
   const externalAuthIssuer = 'https://example.com';
   const alternateIssuer = 'https://alternate.example.com';
-  const externalAuthConfigClientId = randomUUID();
   const externalIdentityProvider = {
     authorizeUrl: 'https://example.com/oauth2/authorize',
     tokenUrl: 'https://example.com/oauth2/token',
@@ -123,6 +122,8 @@ describe('OAuth2 Token', () => {
   let accessToken: string;
   let pkceOptionalClient: ClientApplication;
   let externalAuthClient: ClientApplication;
+  let serverExternalAuthClient: WithId<ClientApplication>;
+  let defaultServerExternalAuthClient: WithId<ClientApplication>;
   let gcipAuthClient: ClientApplication;
   let gcipSubjectAuthClient: ClientApplication;
   let gcipMissingKeyClient: ClientApplication;
@@ -192,6 +193,16 @@ describe('OAuth2 Token', () => {
       name: 'External Auth Client',
       redirectUri,
       identityProvider: externalIdentityProvider,
+    });
+    serverExternalAuthClient = await systemRepo.createResource<ClientApplication>({
+      resourceType: 'ClientApplication',
+      status: 'active',
+      secret: generateSecret(32),
+    });
+    defaultServerExternalAuthClient = await systemRepo.createResource<ClientApplication>({
+      resourceType: 'ClientApplication',
+      status: 'active',
+      secret: generateSecret(32),
     });
 
     gcipAuthClient = await createClient(systemRepo, {
@@ -2056,6 +2067,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: externalAuthClient.id,
+      client_secret: externalAuthClient.secret,
       subject_token: 'xyz',
     });
     expect(res).toHaveStatus(200);
@@ -2071,6 +2083,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: externalAuthClient.id,
+      client_secret: externalAuthClient.secret,
       subject_token: 'xyz',
     });
     expect(res).toHaveStatus(200);
@@ -2081,7 +2094,7 @@ describe('OAuth2 Token', () => {
     config.externalAuthProviders = [
       {
         issuer: externalAuthIssuer,
-        clientId: externalAuthConfigClientId,
+        clientId: serverExternalAuthClient.id,
         identityProvider: {
           ...externalIdentityProvider,
           userInfoUrl: 'https://server-config.example.com/oauth2/userinfo',
@@ -2094,7 +2107,8 @@ describe('OAuth2 Token', () => {
     const res = await request(app).post('/oauth2/token').type('form').send({
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
-      client_id: externalAuthConfigClientId,
+      client_id: serverExternalAuthClient.id,
+      client_secret: serverExternalAuthClient.secret,
       subject_token: 'opaque-token',
     });
     expect(res).toHaveStatus(200);
@@ -2102,8 +2116,34 @@ describe('OAuth2 Token', () => {
     expect(res.body.expires_in).toBe(3600);
     const claims = (await verifyJwt(res.body.access_token)).payload;
     expect(claims.aud).toBe(config.issuer);
-    expect(claims.client_id).toBeUndefined();
+    expect(claims.client_id).toBe(serverExternalAuthClient.id);
     expect(fetchMock).toHaveBeenCalledWith('https://server-config.example.com/oauth2/userinfo', expect.anything());
+  });
+
+  test('Token exchange rejects a server external auth provider without client authentication', async () => {
+    config.externalAuthProviders = [
+      {
+        issuer: externalAuthIssuer,
+        clientId: serverExternalAuthClient.id,
+        identityProvider: {
+          ...externalIdentityProvider,
+          userInfoUrl: 'https://server-config.example.com/oauth2/userinfo',
+        },
+      },
+    ];
+
+    fetchMock.mockImplementation(() => mockFetchJson({ email }));
+
+    const res = await request(app).post('/oauth2/token').type('form').send({
+      grant_type: OAuthGrantType.TokenExchange,
+      subject_token_type: OAuthTokenType.AccessToken,
+      client_id: serverExternalAuthClient.id,
+      subject_token: 'opaque-token',
+    });
+    expect(res).toHaveStatus(400);
+    expect(res.body.error).toBe('invalid_request');
+    expect(res.body.error_description).toBe('Missing client_secret');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test('Token exchange defaults server external auth selector to identity provider client ID', async () => {
@@ -2112,6 +2152,7 @@ describe('OAuth2 Token', () => {
         issuer: externalAuthIssuer,
         identityProvider: {
           ...externalIdentityProvider,
+          clientId: defaultServerExternalAuthClient.id,
           userInfoUrl: 'https://server-config.example.com/oauth2/userinfo',
         },
       },
@@ -2122,7 +2163,8 @@ describe('OAuth2 Token', () => {
     const res = await request(app).post('/oauth2/token').type('form').send({
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
-      client_id: externalIdentityProvider.clientId,
+      client_id: defaultServerExternalAuthClient.id,
+      client_secret: defaultServerExternalAuthClient.secret,
       subject_token: 'opaque-token',
     });
     expect(res).toHaveStatus(200);
@@ -2134,7 +2176,7 @@ describe('OAuth2 Token', () => {
     config.externalAuthProviders = [
       {
         issuer: externalAuthIssuer,
-        clientId: externalAuthConfigClientId,
+        clientId: serverExternalAuthClient.id,
         userInfoUrl: 'https://server-config.example.com/oauth2/userinfo',
       },
     ];
@@ -2144,7 +2186,8 @@ describe('OAuth2 Token', () => {
     const res = await request(app).post('/oauth2/token').type('form').send({
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
-      client_id: externalAuthConfigClientId,
+      client_id: serverExternalAuthClient.id,
+      client_secret: serverExternalAuthClient.secret,
       subject_token: 'opaque-token',
     });
     expect(res).toHaveStatus(200);
@@ -2157,6 +2200,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: randomUUID(),
+      client_secret: 'invalid-client-secret',
       subject_token: 'opaque-token',
     });
     expect(res).toHaveStatus(400);
@@ -2181,6 +2225,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: client.id,
+      client_secret: client.secret,
       subject_token: 'opaque-token',
     });
     expect(res).toHaveStatus(400);
@@ -2207,6 +2252,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: externalAuthClient.id,
+      client_secret: externalAuthClient.secret,
       subject_token: 'opaque-token',
     });
     expect(res).toHaveStatus(200);
@@ -2216,7 +2262,7 @@ describe('OAuth2 Token', () => {
 
   test('Token exchange membership ID derives project across client project boundary', async () => {
     config.externalAuthProviders = [
-      { issuer: externalAuthIssuer, clientId: externalAuthConfigClientId, identityProvider: externalIdentityProvider },
+      { issuer: externalAuthIssuer, clientId: serverExternalAuthClient.id, identityProvider: externalIdentityProvider },
     ];
 
     const { project: otherProject } = await createTestProject();
@@ -2234,7 +2280,8 @@ describe('OAuth2 Token', () => {
     const res = await request(app).post('/oauth2/token').type('form').send({
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
-      client_id: externalAuthConfigClientId,
+      client_id: serverExternalAuthClient.id,
+      client_secret: serverExternalAuthClient.secret,
       subject_token: 'opaque-token',
       membership_id: otherMembership.id,
     });
@@ -2245,13 +2292,14 @@ describe('OAuth2 Token', () => {
 
   test('Token exchange rejects unknown membership ID for server external auth provider', async () => {
     config.externalAuthProviders = [
-      { issuer: externalAuthIssuer, clientId: externalAuthConfigClientId, identityProvider: externalIdentityProvider },
+      { issuer: externalAuthIssuer, clientId: serverExternalAuthClient.id, identityProvider: externalIdentityProvider },
     ];
 
     const res = await request(app).post('/oauth2/token').type('form').send({
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
-      client_id: externalAuthConfigClientId,
+      client_id: serverExternalAuthClient.id,
+      client_secret: serverExternalAuthClient.secret,
       subject_token: 'opaque-token',
       membership_id: randomUUID(),
     });
@@ -2263,20 +2311,24 @@ describe('OAuth2 Token', () => {
 
   test('Token exchange rejects membership without project for server external auth provider', async () => {
     config.externalAuthProviders = [
-      { issuer: externalAuthIssuer, clientId: externalAuthConfigClientId, identityProvider: externalIdentityProvider },
+      { issuer: externalAuthIssuer, clientId: serverExternalAuthClient.id, identityProvider: externalIdentityProvider },
     ];
     const membershipId = randomUUID();
-    const readResourceSpy = vi.spyOn(Repository.prototype, 'readResource').mockResolvedValueOnce({
-      resourceType: 'ProjectMembership',
-      id: membershipId,
-    } as WithId<ProjectMembership>);
+    const readResourceSpy = vi
+      .spyOn(Repository.prototype, 'readResource')
+      .mockResolvedValueOnce(serverExternalAuthClient)
+      .mockResolvedValueOnce({
+        resourceType: 'ProjectMembership',
+        id: membershipId,
+      } as WithId<ProjectMembership>);
 
     let res: request.Response;
     try {
       res = await request(app).post('/oauth2/token').type('form').send({
         grant_type: OAuthGrantType.TokenExchange,
         subject_token_type: OAuthTokenType.AccessToken,
-        client_id: externalAuthConfigClientId,
+        client_id: serverExternalAuthClient.id,
+        client_secret: serverExternalAuthClient.secret,
         subject_token: 'opaque-token',
         membership_id: membershipId,
       });
@@ -2296,6 +2348,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: gcipAuthClient.id,
+      client_secret: gcipAuthClient.secret,
       subject_token: 'firebase-token',
     });
     expect(res).toHaveStatus(200);
@@ -2341,6 +2394,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: gcipSubjectAuthClient.id,
+      client_secret: gcipSubjectAuthClient.secret,
       subject_token: 'firebase-token',
     });
     expect(res).toHaveStatus(200);
@@ -2354,6 +2408,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: gcipAuthClient.id,
+      client_secret: gcipAuthClient.secret,
       subject_token: 'firebase-token',
     });
     expect(res).toHaveStatus(400);
@@ -2367,6 +2422,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: gcipAuthClient.id,
+      client_secret: gcipAuthClient.secret,
       subject_token: 'firebase-token',
     });
     expect(res).toHaveStatus(400);
@@ -2378,6 +2434,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: gcipMissingKeyClient.id,
+      client_secret: gcipMissingKeyClient.secret,
       subject_token: 'firebase-token',
     });
     expect(res).toHaveStatus(400);
@@ -2392,6 +2449,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: externalAuthClient.id,
+      client_secret: externalAuthClient.secret,
       subject_token: 'xyz',
     });
     expect(res).toHaveStatus(400);
@@ -2406,6 +2464,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: externalAuthClient.id,
+      client_secret: externalAuthClient.secret,
       subject_token: 'xyz',
     });
     expect(res).toHaveStatus(429);
@@ -2418,11 +2477,12 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: '',
+      client_secret: 'invalid-client-secret',
       subject_token: 'xyz',
     });
     expect(res).toHaveStatus(400);
     expect(res.body.error).toBe('invalid_request');
-    expect(res.body.error_description).toBe('Invalid client');
+    expect(res.body.error_description).toBe('Missing client_id');
   });
 
   test('Token exchange missing subject token', async () => {
@@ -2430,6 +2490,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: externalAuthClient.id,
+      client_secret: externalAuthClient.secret,
       subject_token: '',
     });
     expect(res).toHaveStatus(400);
@@ -2442,6 +2503,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.Saml1Token,
       client_id: externalAuthClient.id,
+      client_secret: externalAuthClient.secret,
       subject_token: 'xyz',
     });
     expect(res).toHaveStatus(400);
@@ -2457,6 +2519,7 @@ describe('OAuth2 Token', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: invalidAuthClient.id,
+      client_secret: invalidAuthClient.secret,
       subject_token: 'xyz',
     });
     expect(res).toHaveStatus(400);

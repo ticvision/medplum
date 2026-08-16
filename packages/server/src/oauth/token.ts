@@ -407,10 +407,24 @@ export async function rotateLoginRefreshSecret(
  * @returns Promise to complete.
  */
 async function handleTokenExchange(req: Request, res: Response): Promise<void> {
-  return exchangeExternalAuthToken(
+  const { clientId, clientSecret, error } = await getClientIdAndSecret(req);
+  if (error) {
+    sendTokenError(res, 'invalid_request', error);
+    return;
+  }
+  if (!clientId) {
+    sendTokenError(res, 'invalid_request', 'Missing client_id');
+    return;
+  }
+  if (!clientSecret) {
+    sendTokenError(res, 'invalid_request', 'Missing client_secret');
+    return;
+  }
+  await exchangeExternalAuthToken(
     req,
     res,
-    req.body.client_id,
+    clientId,
+    clientSecret,
     req.body.subject_token,
     req.body.subject_token_type,
     req.body.membership_id
@@ -423,6 +437,7 @@ async function handleTokenExchange(req: Request, res: Response): Promise<void> {
  * @param req - The HTTP request.
  * @param res - The HTTP response.
  * @param clientId - The client application ID.
+ * @param clientSecret - The authenticated client credential.
  * @param subjectToken - The subject token. Only access tokens are currently supported.
  * @param subjectTokenType - The subject token type as defined in Section 3.  Only "urn:ietf:params:oauth:token-type:access_token" is currently supported.
  * @param membershipId - Optional membership ID to restrict the exchange to.
@@ -431,6 +446,7 @@ export async function exchangeExternalAuthToken(
   req: Request,
   res: Response,
   clientId: string,
+  clientSecret: string,
   subjectToken: string,
   subjectTokenType: OAuthTokenType,
   membershipId?: string
@@ -440,21 +456,21 @@ export async function exchangeExternalAuthToken(
   }
 
   const systemRepo = getGlobalSystemRepo();
-  let client: ClientApplication | undefined;
-  // Server external auth providers are selected before ClientApplication lookup.
-  let idp = resolveExternalAuthProvider(clientId);
-  const useServerExternalAuth = !!idp;
-
-  if (!idp) {
-    client = await tryReadTokenExchangeClient(systemRepo, clientId);
-    if (!client) {
-      sendTokenError(res, 'invalid_request', 'Invalid client');
-      return;
-    }
-
-    idp = resolveExternalAuthProvider(clientId, client);
+  const client = await tryReadTokenExchangeClient(systemRepo, clientId);
+  if (!client || (client.status && client.status !== 'active')) {
+    sendTokenError(res, 'invalid_request', 'Invalid client');
+    return;
+  }
+  if (!(await validateClientIdAndSecret(res, client, clientSecret))) {
+    return;
   }
 
+  // A server-level provider is a selector, never a replacement for OAuth
+  // client authentication. Every exchange is attributable to one active,
+  // authenticated ClientApplication before any external userinfo request.
+  let idp = resolveExternalAuthProvider(clientId);
+  const useServerExternalAuth = !!idp;
+  idp ??= resolveExternalAuthProvider(clientId, client);
   if (!idp) {
     sendTokenError(res, 'invalid_request', 'Invalid client');
     return;
@@ -492,7 +508,7 @@ export async function exchangeExternalAuthToken(
     email,
     externalId,
     projectId,
-    clientId: client?.id,
+    clientId: client.id,
     scope: req.body.scope || 'openid offline_access',
     nonce: req.body.nonce || randomUUID(),
     remoteAddress: req.ip,

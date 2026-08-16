@@ -3,6 +3,7 @@
 import { badRequest, ContentType, getReferenceString, unsupportedMediaType } from '@medplum/core';
 import type { OperationOutcome, Patient } from '@medplum/fhirtypes';
 import express, { json } from 'express';
+import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import type { Mock, MockInstance } from 'vitest';
 import { vi } from 'vitest';
@@ -195,7 +196,9 @@ describe('App', () => {
 
       const logLine = (process.stdout.write as Mock).mock.calls[0][0];
       const logObj = JSON.parse(logLine);
-      expect(logObj).toMatchObject({ profile: `${getReferenceString(client)} (as ${getReferenceString(profile)})` });
+      expect(logObj).toMatchObject({ profileType: 'ClientApplication', onBehalfOf: true });
+      expect(logLine).not.toContain(getReferenceString(client));
+      expect(logLine).not.toContain(getReferenceString(profile));
     });
 
     test('Logs on middleware error', async () => {
@@ -237,6 +240,18 @@ describe('App', () => {
       const logObj = JSON.parse(logLines[0][0]);
       // Request should be logged
       expect(logObj).toMatchObject({ method: 'GET', path: '/fhir/R4/Patient', status: 400 });
+    });
+
+    test('Request log omits the complete query string', async () => {
+      const marker = `Patient/${randomUUID()}`;
+      const res = await request(app).get(`/fhir/R4/Patient?actor=${marker}`);
+      expect(res).toHaveStatus(401);
+
+      const logLines = stdOutSpy.mock.calls.filter((call) => call[0].includes('Request served'));
+      expect(logLines).toHaveLength(1);
+      const logObj = JSON.parse(logLines[0][0]);
+      expect(logObj.path).toBe('/fhir/R4/Patient');
+      expect(logLines[0][0]).not.toContain(marker);
     });
 
     test('Route parsing error', async () => {

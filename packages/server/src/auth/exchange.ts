@@ -16,6 +16,7 @@ import { makeValidationMiddleware } from '../util/validator';
 export const exchangeValidator = makeValidationMiddleware([
   body('externalAccessToken').notEmpty().withMessage('Missing externalAccessToken'),
   body('clientId').notEmpty().withMessage('Missing clientId'),
+  body('clientSecret').notEmpty().withMessage('Missing clientSecret'),
 ]);
 
 export const exchangeHandler = async (req: Request, res: Response): Promise<void> => {
@@ -23,6 +24,7 @@ export const exchangeHandler = async (req: Request, res: Response): Promise<void
     req,
     res,
     req.body.clientId as string,
+    req.body.clientSecret as string,
     req.body.externalAccessToken as string,
     OAuthTokenType.AccessToken
   );

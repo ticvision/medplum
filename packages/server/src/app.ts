@@ -305,7 +305,9 @@ const loggingMiddleware = (req: Request, res: Response, next: NextFunction): voi
       durationMs: duration,
       ip: req.ip,
       method: req.method,
-      path: req.originalUrl,
+      // Never log query strings. FHIR searches and OAuth callbacks commonly
+      // carry Patient references, codes, and other sensitive values in them.
+      path: req.path === '/' ? req.baseUrl || '/' : `${req.baseUrl}${req.path}`,
       receivedAt: start,
       // If the response did not emit the 'finish' event, the client timed out and disconnected before it could be sent
       status: res.writableFinished ? res.statusCode : 408,
