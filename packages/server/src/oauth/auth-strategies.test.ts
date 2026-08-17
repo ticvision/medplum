@@ -302,6 +302,7 @@ describe('JWT bearer token exchange (RFC 8693)', () => {
       grant_type: OAuthGrantType.TokenExchange,
       subject_token_type: OAuthTokenType.AccessToken,
       client_id: client.id,
+      client_secret: client.secret,
       subject_token: 'third-party-subject-token',
     });
     expect(tokenRes.status).toBe(200);

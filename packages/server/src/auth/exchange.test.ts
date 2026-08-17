@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import type { WithId } from '@medplum/core';
-import { ContentType } from '@medplum/core';
-import type { ClientApplication, Project } from '@medplum/fhirtypes';
+import { ContentType, createReference } from '@medplum/core';
+import type { AccessPolicy, ClientApplication, Project, ProjectMembership } from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
 import express from 'express';
 import request from 'supertest';
@@ -12,7 +12,8 @@ import { inviteUser } from '../admin/invite';
 import { initApp, shutdownApp } from '../app';
 import { loadTestConfig } from '../config/loader';
 import type { MedplumServerConfig } from '../config/types';
-import { getProjectSystemRepo } from '../fhir/repo';
+import { CORAL_EXCHANGE_POLICY_NAME } from '../fhir/coralexchangeauthority';
+import { getGlobalSystemRepo, getProjectSystemRepo } from '../fhir/repo';
 import { withTestContext } from '../test.setup';
 import { mockFetchJson, mockFetchText } from '../test.setup.fetch';
 import { registerNew } from './register';
@@ -108,10 +109,33 @@ describe('Token Exchange', () => {
           useSubject: true,
         },
       });
-      serverExternalAuthClient = await systemRepo.createResource<ClientApplication>({
+      const exchangeSystemRepo = getGlobalSystemRepo();
+      const serverExternalAuthProject = await exchangeSystemRepo.createResource<Project>({
+        resourceType: 'Project',
+        name: 'Server external auth authority',
+        strictMode: true,
+        superAdmin: false,
+      });
+      serverExternalAuthClient = await exchangeSystemRepo.createResource<ClientApplication>({
         resourceType: 'ClientApplication',
         status: 'active',
         secret: randomUUID(),
+        meta: { project: serverExternalAuthProject.id },
+      });
+      const serverExternalAuthPolicy = await exchangeSystemRepo.createResource<AccessPolicy>({
+        resourceType: 'AccessPolicy',
+        meta: { project: serverExternalAuthProject.id },
+        name: CORAL_EXCHANGE_POLICY_NAME,
+        resource: [],
+      });
+      await exchangeSystemRepo.createResource<ProjectMembership>({
+        resourceType: 'ProjectMembership',
+        user: createReference(serverExternalAuthClient),
+        profile: createReference(serverExternalAuthClient),
+        project: createReference(serverExternalAuthProject),
+        accessPolicy: createReference(serverExternalAuthPolicy),
+        active: true,
+        admin: false,
       });
 
       // Invite user with external ID
