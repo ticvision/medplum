@@ -1,0 +1,240 @@
+name: Coral Medplum immutable image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coral-medplum-dev-image
+  cancel-in-progress: false
+
+jobs:
+  build-and-scan:
+    name: Build and scan exact Coral Medplum image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: medplum-dev-image
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: us-east-2
+      AWS_ACCOUNT_ID: '689186650710'
+      ECR_REPOSITORY: coralehr/medplum-dev-server
+      SERVER_DOCKERHUB_REPOSITORY: 689186650710.dkr.ecr.us-east-2.amazonaws.com/coralehr/medplum-dev-server
+      SERVER_DOCKER_PLATFORMS: linux/amd64
+      NODE_OPTIONS: --max-old-space-size=8192
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Prove exact source authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/feat/coral-medplum-confidential-exchange-0815"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --short)"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run confidential-exchange and log-boundary tests
+        run: >-
+          npm exec --workspace=@medplum/server -- vitest run
+          src/oauth/token.test.ts
+          src/admin/client.test.ts
+          src/util/console.test.ts
+          src/infra/coral-image-workflow.test.ts
+
+      - name: Reject high-severity production dependency findings
+        run: npm audit --audit-level=high --omit=dev --workspace=@medplum/server
+
+      - name: Build reviewed workspace
+        run: npm run build
+        env:
+          MEDPLUM_BASE_URL: __MEDPLUM_BASE_URL__
+          MEDPLUM_CLIENT_ID: __MEDPLUM_CLIENT_ID__
+          MEDPLUM_REGISTER_ENABLED: __MEDPLUM_REGISTER_ENABLED__
+          GOOGLE_CLIENT_ID: __GOOGLE_CLIENT_ID__
+          RECAPTCHA_SITE_KEY: __RECAPTCHA_SITE_KEY__
+
+      - name: Configure exact AWS build role
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          role-to-assume: arn:aws:iam::689186650710:role/github-actions-coral-medplum-image-build
+          aws-region: us-east-2
+
+      - name: Prove application account and immutable repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          test "$ACTUAL_ACCOUNT" = "$AWS_ACCOUNT_ID"
+          read -r MUTABILITY SCAN_ON_PUSH < <(
+            aws ecr describe-repositories \
+              --repository-names "$ECR_REPOSITORY" \
+              --region "$AWS_REGION" \
+              --query 'repositories[0].[imageTagMutability,imageScanningConfiguration.scanOnPush]' \
+              --output text
+          )
+          test "$MUTABILITY" = "IMMUTABLE"
+          test "$SCAN_ON_PUSH" = "True"
+          REGISTRY_SCANNING=$(aws ecr get-registry-scanning-configuration \
+            --region "$AWS_REGION" \
+            --output json)
+          jq -e --arg repository "$ECR_REPOSITORY" '
+            .scanningConfiguration.scanType == "BASIC" and
+            any(
+              .scanningConfiguration.rules[];
+              .scanFrequency == "SCAN_ON_PUSH" and
+              any(.repositoryFilters[]; .filter == $repository and .filterType == "WILDCARD")
+            )
+          ' <<< "$REGISTRY_SCANNING" > /dev/null
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@261fc3d4806db1fa66a15cc11113c456db8870a7 # v2.1.0
+
+      - name: Resume an existing immutable commit image
+        id: existing_image
+        shell: bash
+        run: |
+          set -euo pipefail
+          ERROR_FILE=$(mktemp)
+          trap 'rm -f "$ERROR_FILE"' EXIT
+          set +e
+          EXISTING_DIGEST=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$GITHUB_SHA" \
+            --region "$AWS_REGION" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text \
+            2> "$ERROR_FILE")
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            if ! grep -q 'ImageNotFoundException' "$ERROR_FILE"; then
+              echo "Unable to determine whether the immutable commit image exists" >&2
+              exit 1
+            fi
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$EXISTING_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            echo "existing immutable commit image; resuming verification"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "SERVER_DOCKER_IMAGE_DIGEST=$EXISTING_DIGEST" >> "$GITHUB_ENV"
+            echo "SERVER_DOCKER_IMAGE=$SERVER_DOCKERHUB_REPOSITORY@$EXISTING_DIGEST" >> "$GITHUB_ENV"
+          fi
+
+      - name: Login to Docker Hardened Images
+        if: steps.existing_image.outputs.exists != 'true'
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build and push commit-only image
+        if: steps.existing_image.outputs.exists != 'true'
+        run: ./scripts/build-docker-server.sh
+
+      - name: Bind ECR digest to the exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$SERVER_DOCKER_IMAGE" = "$SERVER_DOCKERHUB_REPOSITORY@$SERVER_DOCKER_IMAGE_DIGEST"
+          ECR_DIGEST=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$GITHUB_SHA" \
+            --region "$AWS_REGION" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          test "$ECR_DIGEST" = "$SERVER_DOCKER_IMAGE_DIGEST"
+          IMAGE_INDEX=$(docker buildx imagetools inspect "$SERVER_DOCKER_IMAGE" --raw)
+          jq -e '.mediaType == "application/vnd.oci.image.index.v1+json"' \
+            <<< "$IMAGE_INDEX" > /dev/null
+          RUNTIME_MANIFEST_DIGEST=$(jq -er '
+            [
+              .manifests[] |
+              select(
+                .platform.os == "linux" and
+                .platform.architecture == "amd64"
+              ) |
+              .digest
+            ] |
+            if length == 1 then .[0] else error("expected one amd64 runtime manifest") end
+          ' <<< "$IMAGE_INDEX")
+          [[ "$RUNTIME_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          ATTESTATION_MANIFEST_DIGEST=$(jq -er --arg runtime "$RUNTIME_MANIFEST_DIGEST" '
+            [
+              .manifests[] |
+              select(
+                .annotations["vnd.docker.reference.type"] == "attestation-manifest" and
+                .annotations["vnd.docker.reference.digest"] == $runtime
+              ) |
+              .digest
+            ] |
+            if length == 1 then .[0] else error("expected one runtime attestation manifest") end
+          ' <<< "$IMAGE_INDEX")
+          [[ "$ATTESTATION_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          ATTESTATION_MANIFEST=$(docker buildx imagetools inspect \
+            "$SERVER_DOCKERHUB_REPOSITORY@$ATTESTATION_MANIFEST_DIGEST" \
+            --raw)
+          jq -e '
+            [.layers[].annotations["in-toto.io/predicate-type"]] as $predicates |
+            any($predicates[]; startswith("https://slsa.dev/provenance/")) and
+            any($predicates[]; . == "https://spdx.dev/Document")
+          ' <<< "$ATTESTATION_MANIFEST" > /dev/null
+          echo "RUNTIME_MANIFEST_DIGEST=$RUNTIME_MANIFEST_DIGEST" >> "$GITHUB_ENV"
+
+      - name: Wait for exact image scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecr wait image-scan-complete \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-id "imageDigest=$RUNTIME_MANIFEST_DIGEST" \
+            --region "$AWS_REGION"
+
+      - name: Reject high or critical image findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r CRITICAL HIGH < <(
+            aws ecr describe-image-scan-findings \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-id "imageDigest=$RUNTIME_MANIFEST_DIGEST" \
+              --region "$AWS_REGION" \
+              --query '[imageScanFindings.findingSeverityCounts.CRITICAL || `0`,imageScanFindings.findingSeverityCounts.HIGH || `0`]' \
+              --output text
+          )
+          test "$CRITICAL" = "0"
+          test "$HIGH" = "0"
+
+      - name: Record immutable image receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Coral Medplum image receipt"
+            echo "GITHUB_SHA=${GITHUB_SHA}"
+            echo "SERVER_DOCKER_IMAGE=${SERVER_DOCKER_IMAGE}"
+            echo "SERVER_DOCKER_IMAGE_DIGEST=${SERVER_DOCKER_IMAGE_DIGEST}"
+            echo "RUNTIME_MANIFEST_DIGEST=${RUNTIME_MANIFEST_DIGEST}"
+            echo "PLATFORM=${SERVER_DOCKER_PLATFORMS}"
+            echo "SCAN=HIGH:0,CRITICAL:0"
+            echo "ATTESTATIONS=SLSA_PROVENANCE:verified,SPDX_SBOM:verified"
+          } >> "$GITHUB_STEP_SUMMARY"

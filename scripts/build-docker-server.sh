@@ -51,8 +51,11 @@ tar \
 # See: https://docs.docker.com/scout/policy/#supply-chain-attestations
 ATTESTATIONS="--provenance=true --sbom=true"
 
-# Target platforms
-PLATFORMS="--platform linux/amd64,linux/arm64"
+# Target platforms. Release builds retain the existing multi-architecture
+# default. Coral's first private image is intentionally one amd64 manifest so
+# ECR can scan the exact digest that the current Fargate service will run.
+DOCKER_PLATFORMS="${SERVER_DOCKER_PLATFORMS:-linux/amd64,linux/arm64}"
+PLATFORMS=(--platform "$DOCKER_PLATFORMS")
 
 # If this is a release, get version information
 # Release is specified with a "--release" argument
@@ -81,7 +84,7 @@ if [[ "$IS_RELEASE" == "true" ]]; then
 fi
 
 METADATA_FILE=$(mktemp)
-docker buildx build $ATTESTATIONS $PLATFORMS $SERVER_TAGS --progress=plain --push --metadata-file "$METADATA_FILE" .
+docker buildx build $ATTESTATIONS "${PLATFORMS[@]}" $SERVER_TAGS --progress=plain --push --metadata-file "$METADATA_FILE" .
 
 SERVER_DOCKER_IMAGE_DIGEST=$(jq -r '."containerimage.digest"' "$METADATA_FILE")
 rm -f "$METADATA_FILE"
