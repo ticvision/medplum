@@ -12,6 +12,13 @@ export const CORAL_EXCHANGE_POLICY_NAME = 'Coral confidential token exchange den
  * The graph is deliberately stricter than ordinary Medplum applications: the
  * client has no browser or identity-provider authority, the project cannot
  * inherit access, and the membership points at one explicit empty policy.
+ * @param project - Dedicated non-superadmin exchange Project.
+ * @param policy - Exact empty AccessPolicy for the exchange client.
+ * @param client - Confidential ClientApplication being validated.
+ * @param membership - Client membership in the dedicated Project.
+ * @param expectedClientStatus - Required ClientApplication lifecycle state.
+ * @param expectedMembershipActive - Required membership activation state.
+ * @returns True only when the complete authority graph is exact and inert.
  */
 export function isSafeConfidentialExchangeAuthority(
   project: Project,

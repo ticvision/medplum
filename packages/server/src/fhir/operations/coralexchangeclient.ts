@@ -95,6 +95,51 @@ interface ExchangeClientState {
   membershipVersionId: string;
 }
 
+interface ExpectedTransitionState {
+  clientStatus: 'active' | 'off';
+  membershipActive: boolean;
+  next?: {
+    clientStatus: 'active' | 'off';
+    membershipActive: boolean;
+  };
+}
+
+function expectedTransitionState(action: TransitionExchangeClientParameters['action']): ExpectedTransitionState {
+  switch (action) {
+    case 'activate':
+      return {
+        clientStatus: 'off',
+        membershipActive: false,
+        next: { clientStatus: 'active', membershipActive: true },
+      };
+    case 'restage':
+      return {
+        clientStatus: 'active',
+        membershipActive: true,
+        next: { clientStatus: 'off', membershipActive: false },
+      };
+    case 'verify':
+      return { clientStatus: 'active', membershipActive: true };
+    default:
+      throw new Error('Invalid Coral exchange authority action');
+  }
+}
+
+function transitionReceiptStatus(
+  action: TransitionExchangeClientParameters['action']
+): 'activated' | 'restaged' | 'verified' {
+  switch (action) {
+    case 'activate':
+      return 'activated';
+    case 'restage':
+      return 'restaged';
+    case 'verify':
+      return 'verified';
+    default:
+      throw new Error('Invalid Coral exchange authority action');
+  }
+}
+
 function secretsEqual(actual: string | undefined, expected: string): boolean {
   if (!actual || !CLIENT_SECRET.test(actual) || !CLIENT_SECRET.test(expected)) {
     return false;
@@ -129,7 +174,11 @@ function isExactAuthority(
   );
 }
 
-/** Returns a secret-free CAS snapshot of the exact fixed authority graph. */
+/**
+ * Returns a secret-free CAS snapshot of the exact fixed authority graph.
+ * @param systemRepo - Super-admin system repository.
+ * @returns Exact lifecycle state and four resource versions.
+ */
 export async function readCoralExchangeClientState(systemRepo: SystemRepository): Promise<ExchangeClientState> {
   const [project, policy, client, membership, memberships] = await Promise.all([
     systemRepo.readResource<Project>('Project', CORAL_EXCHANGE_PROJECT_ID),
@@ -148,12 +197,15 @@ export async function readCoralExchangeClientState(systemRepo: SystemRepository)
       ],
     }),
   ]);
-  const status =
-    isExactAuthority(project, policy, client, membership, 'off', false) && CLIENT_SECRET.test(client.secret ?? '')
-      ? ('staged' as const)
-      : isExactAuthority(project, policy, client, membership, 'active', true) && CLIENT_SECRET.test(client.secret ?? '')
-        ? ('active' as const)
-        : undefined;
+  let status: ExchangeClientState['status'] | undefined;
+  if (isExactAuthority(project, policy, client, membership, 'off', false) && CLIENT_SECRET.test(client.secret ?? '')) {
+    status = 'staged';
+  } else if (
+    isExactAuthority(project, policy, client, membership, 'active', true) &&
+    CLIENT_SECRET.test(client.secret ?? '')
+  ) {
+    status = 'active';
+  }
   const versions = {
     projectVersionId: project.meta?.versionId,
     policyVersionId: policy.meta?.versionId,
@@ -306,31 +358,8 @@ export async function transitionCoralExchangeClientResources(
       ) {
         throw new OperationOutcomeError(preconditionFailed);
       }
-      const expectedState =
-        input.action === 'activate'
-          ? {
-              clientStatus: 'off' as const,
-              membershipActive: false,
-              nextClientStatus: 'active' as const,
-              nextActive: true,
-            }
-          : input.action === 'restage'
-            ? {
-                clientStatus: 'active' as const,
-                membershipActive: true,
-                nextClientStatus: 'off' as const,
-                nextActive: false,
-              }
-            : input.action === 'verify'
-              ? {
-                  clientStatus: 'active' as const,
-                  membershipActive: true,
-                  nextClientStatus: undefined,
-                  nextActive: undefined,
-                }
-              : undefined;
+      const expectedState = expectedTransitionState(input.action);
       if (
-        !expectedState ||
         memberships.length !== 1 ||
         memberships[0].id !== CORAL_EXCHANGE_MEMBERSHIP_ID ||
         !isExactAuthority(
@@ -345,13 +374,13 @@ export async function transitionCoralExchangeClientResources(
       ) {
         throw new OperationOutcomeError(badRequest('Invalid Coral exchange authority transition'));
       }
-      if (input.action !== 'verify') {
+      if (expectedState.next) {
         await txRepo.updateResource<ClientApplication>(
-          { ...client, status: expectedState.nextClientStatus },
+          { ...client, status: expectedState.next.clientStatus },
           { ifMatch: input.clientVersionId }
         );
         await txRepo.updateResource<ProjectMembership>(
-          { ...membership, active: expectedState.nextActive },
+          { ...membership, active: expectedState.next.membershipActive },
           { ifMatch: input.membershipVersionId }
         );
       }
@@ -394,12 +423,16 @@ export async function coralTransitionExchangeClientHandler(req: FhirRequest): Pr
   return [
     allOk,
     buildOutputParameters(transitionOperation, {
-      status: input.action === 'activate' ? 'activated' : input.action === 'restage' ? 'restaged' : 'verified',
+      status: transitionReceiptStatus(input.action),
     }),
   ];
 }
 
-/** Returns the exact authority state and versions without exposing its credential. */
+/**
+ * Returns the exact authority state and versions without exposing its credential.
+ * @param _req - Empty system-level FHIR operation request.
+ * @returns Sanitized state and version receipt.
+ */
 export async function coralExchangeClientStateHandler(_req: FhirRequest): Promise<FhirResponse> {
   const { project } = getAuthenticatedContext();
   if (project.superAdmin !== true) {
